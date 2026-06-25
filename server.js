@@ -288,9 +288,12 @@ app.post('/api/admin/package-pricing', async (req, res) => {
     res.json({ success: true, data });
 });
 
-const PORT = process.env.PORT || 5001;
-app.listen(PORT, () => {
-    console.log(`PhonePe Backend Server running on port ${PORT} (${ENV} mode)`);
-});
+// Only start the HTTP server locally. On Vercel serverless, we export the app handler directly.
+if (!process.env.VERCEL) {
+    const PORT = process.env.PORT || 5001;
+    app.listen(PORT, () => {
+        console.log(`OxyCare Labs API Server running on port ${PORT} (${ENV} mode)`);
+    });
+}
 
 export default app;
