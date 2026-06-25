@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState } from 'react';
-import db from '../services/db';
+import { supabase } from '../services/supabase';
 import * as otpService from '../services/otpService';
 
 const AuthContext = createContext();
@@ -22,10 +22,16 @@ export const AuthProvider = ({ children }) => {
     const [isAuthenticated, setIsAuthenticated] = useState(() => !!user);
     const [isLoading, setIsLoading] = useState(false);
 
+    const _saveUser = (userData) => {
+        setUser(userData);
+        setIsAuthenticated(true);
+        localStorage.setItem('oxycare_user', JSON.stringify(userData));
+    };
+
     const login = async (identifier, password) => {
         setIsLoading(true);
         try {
-            const id = identifier.toLowerCase();
+            const id = identifier.toLowerCase().trim();
 
             // Admin credentials (hardcoded bypass)
             if (id === 'admin@oxycare.com' && password === 'admin123') {
@@ -37,27 +43,11 @@ export const AuthProvider = ({ children }) => {
                     joined: '01 Jan, 2026',
                     avatar: 'https://i.pravatar.cc/150?img=12'
                 };
-                setUser(userData);
-                setIsAuthenticated(true);
-                localStorage.setItem('oxycare_user', JSON.stringify(userData));
+                _saveUser(userData);
                 return userData;
             }
 
-            // IndexedDB Lookup
-            const savedUsers = await db.users.toArray();
-            const foundUser = savedUsers.find(u =>
-                (u.email?.toLowerCase() === id || u.phone?.replace(/[^0-9]/g, '') === id.replace(/[^0-9]/g, '')) &&
-                u.password === password
-            );
-
-            if (foundUser) {
-                setUser(foundUser);
-                setIsAuthenticated(true);
-                localStorage.setItem('oxycare_user', JSON.stringify(foundUser));
-                return foundUser;
-            }
-
-            // Demo fallback
+            // Demo user fallback
             if ((id === 'user@oxycare.com' || id === '9999988888') && password === 'user123') {
                 const userData = {
                     id: 'USER-DEMO',
@@ -69,10 +59,29 @@ export const AuthProvider = ({ children }) => {
                     avatar: 'https://i.pravatar.cc/150?img=32',
                     addresses: []
                 };
-                setUser(userData);
-                setIsAuthenticated(true);
-                localStorage.setItem('oxycare_user', JSON.stringify(userData));
+                _saveUser(userData);
                 return userData;
+            }
+
+            // Supabase lookup (replaces IndexedDB)
+            const { data: rows, error } = await supabase
+                .from('users')
+                .select('id, data')
+                .limit(500);
+
+            if (!error && rows) {
+                const foundRow = rows.find(row => {
+                    const u = row.data || {};
+                    const emailMatch = u.email?.toLowerCase() === id;
+                    const phoneMatch = u.phone?.replace(/[^0-9]/g, '') === id.replace(/[^0-9]/g, '');
+                    return (emailMatch || phoneMatch) && u.password === password;
+                });
+
+                if (foundRow) {
+                    const userData = { id: foundRow.id, ...foundRow.data };
+                    _saveUser(userData);
+                    return userData;
+                }
             }
 
             throw new Error('Invalid credentials');
@@ -103,15 +112,24 @@ export const AuthProvider = ({ children }) => {
     const signup = async (formData) => {
         setIsLoading(true);
         try {
-            const savedUsers = await db.users.toArray();
-            if (savedUsers.some(u => u.phone === formData.phone || u.email === formData.email)) {
-                throw new Error('User already exists');
+            // Check if user already exists in Supabase
+            const { data: rows } = await supabase
+                .from('users')
+                .select('id, data')
+                .limit(500);
+
+            if (rows) {
+                const exists = rows.some(row => {
+                    const u = row.data || {};
+                    return u.phone === formData.phone || u.email === formData.email;
+                });
+                if (exists) throw new Error('User already exists with this phone or email');
             }
 
-            const avatarUrl = `https://api.dicebear.com/7.x/big-smile/svg?seed=${formData.name}`;
-
+            const avatarUrl = `https://api.dicebear.com/7.x/big-smile/svg?seed=${encodeURIComponent(formData.name)}`;
+            const userId = 'USER-' + Date.now();
             const userData = {
-                id: 'USER-' + Date.now(),
+                id: userId,
                 ...formData,
                 role: 'Customer',
                 joined: new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }),
@@ -119,10 +137,11 @@ export const AuthProvider = ({ children }) => {
                 addresses: []
             };
 
-            await db.users.add(userData);
-            setUser(userData);
-            setIsAuthenticated(true);
-            localStorage.setItem('oxycare_user', JSON.stringify(userData));
+            // Save to Supabase users table
+            const { id: _, ...dataObj } = userData;
+            await supabase.from('users').insert([{ id: userId, data: dataObj }]);
+
+            _saveUser(userData);
             return userData;
         } finally {
             setIsLoading(false);
@@ -139,28 +158,21 @@ export const AuthProvider = ({ children }) => {
         const newUserData = { ...user, ...updatedData };
         setUser(newUserData);
         localStorage.setItem('oxycare_user', JSON.stringify(newUserData));
-        await db.users.where('id').equals(newUserData.id).modify(updatedData);
 
-        // Sync to active bookings if name or phone changed
-        if (updatedData.name || updatedData.phone) {
-            const bookingUpdate = {};
-            if (updatedData.phone) bookingUpdate.phone = updatedData.phone;
-            if (updatedData.name) bookingUpdate.userName = updatedData.name;
+        // Sync to Supabase
+        try {
+            const { data: current } = await supabase
+                .from('users')
+                .select('data')
+                .eq('id', String(user.id))
+                .single();
 
-            // Apply updates to bookings that are not completed or cancelled
-            await db.bookings
-                .where('userId').equals(newUserData.id)
-                .filter(b => !['Report completed', 'Cancelled'].includes(b.status))
-                .modify(b => {
-                    if (updatedData.phone) b.phone = updatedData.phone;
-                    if (updatedData.name) {
-                        b.userName = updatedData.name;
-                        // Also update patient name if it's a 'Self' booking
-                        if (b.patientRelation === 'Self') {
-                            b.patientName = updatedData.name;
-                        }
-                    }
-                });
+            if (current) {
+                const merged = { ...current.data, ...updatedData };
+                await supabase.from('users').update({ data: merged }).eq('id', String(user.id));
+            }
+        } catch (e) {
+            console.error('Failed to sync profile to Supabase:', e);
         }
     };
 

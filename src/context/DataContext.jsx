@@ -183,7 +183,6 @@ export const DataProvider = ({ children }) => {
         const initData = async () => {
             console.log('DataContext: Initializing Data from API (Supabase)...');
             try {
-                // Because API is decoupled, we just await fetch all.
                 const [
                     pkgs, cats, lbs, tsts, blgs, 
                     mbrs, addrs, usrs, bkngs, cbrq,
@@ -205,13 +204,22 @@ export const DataProvider = ({ children }) => {
                 ]);
 
                 // Filter out 'Deleted' items (Soft Delete support)
+                // IMPORTANT: Use raw array length (before filter) to decide seeding.
+                // This prevents re-seeding when all items happen to be soft-deleted.
                 const filterDeleted = (arr) => (Array.isArray(arr) ? arr.filter(item => item && item.status !== 'Deleted' && String(item.status).toLowerCase() !== 'deleted') : []);
 
-                setPackages(filterDeleted(pkgs));
-                setTestCategories(filterDeleted(cats));
-                setLabs(filterDeleted(lbs));
-                setTests(filterDeleted(tsts));
-                setBlogs(filterDeleted(blgs));
+                const filteredPkgs = filterDeleted(pkgs);
+                const filteredCats = filterDeleted(cats);
+                const filteredLbs = filterDeleted(lbs);
+                const filteredTsts = filterDeleted(tsts);
+                const filteredBlgs = filterDeleted(blgs);
+                const filteredCtys = filterDeleted(ctys);
+
+                setPackages(filteredPkgs);
+                setTestCategories(filteredCats);
+                setLabs(filteredLbs);
+                setTests(filteredTsts);
+                setBlogs(filteredBlgs);
                 setMembers(filterDeleted(mbrs));
                 setAddresses(filterDeleted(addrs));
                 setUsers(filterDeleted(usrs));
@@ -219,41 +227,43 @@ export const DataProvider = ({ children }) => {
                 setCallbackRequests(filterDeleted(cbrq));
                 setPartnerships(filterDeleted(ptrn));
                 setJobApplications(filterDeleted(jvbs));
-                setServiceableCities(filterDeleted(ctys));
+                setServiceableCities(filteredCtys);
 
-                // Auto-Hydration for completely new projects connecting for the first time
-                if (pkgs.length === 0) {
+                // Auto-Hydration: ONLY seed if the DB table is completely empty (raw count = 0).
+                // Check raw length (pkgs.length, not filteredPkgs.length) to avoid overwriting
+                // tables that have soft-deleted items in them.
+                if (!Array.isArray(pkgs) || pkgs.length === 0) {
                     console.log('Hydrating default packages...');
-                    await api.packages.saveBulk(defaultPackages);
-                    setPackages(defaultPackages);
-                } 
-
-                if (cats.length === 0) {
-                    await api.categories.saveBulk(defaultCategories);
-                    setTestCategories(defaultCategories);
-                } 
-
-                if (lbs.length === 0) {
-                    await api.labs.saveBulk(defaultLabs);
-                    setLabs(defaultLabs);
-                } 
-
-                if (tsts.length === 0) {
-                    await api.tests.saveAll(defaultTests);
-                    setTests(defaultTests);
-                } 
-                
-                if (blgs.length === 0) {
-                    await api.blogs.saveBulk(defaultBlogs);
-                    setBlogs(defaultBlogs);
-                } 
-
-                if (ctys.length === 0) {
-                    await api.cities.saveBulk(defaultCityList);
-                    setServiceableCities(defaultCityList);
+                    const seeded = await api.packages.saveBulk(defaultPackages);
+                    setPackages(seeded);
                 }
 
-                // Static Defaults fallback
+                if (!Array.isArray(cats) || cats.length === 0) {
+                    const seeded = await api.categories.saveBulk(defaultCategories);
+                    setTestCategories(seeded);
+                }
+
+                if (!Array.isArray(lbs) || lbs.length === 0) {
+                    const seeded = await api.labs.saveBulk(defaultLabs);
+                    setLabs(seeded);
+                }
+
+                if (!Array.isArray(tsts) || tsts.length === 0) {
+                    const seeded = await api.tests.saveAll(defaultTests);
+                    setTests(seeded);
+                }
+
+                if (!Array.isArray(blgs) || blgs.length === 0) {
+                    const seeded = await api.blogs.saveBulk(defaultBlogs);
+                    setBlogs(seeded);
+                }
+
+                if (!Array.isArray(ctys) || ctys.length === 0) {
+                    const seeded = await api.cities.saveBulk(defaultCityList);
+                    setServiceableCities(seeded);
+                }
+
+                // Static Defaults
                 setOffers(defaultOffers);
                 setSlots(defaultSlots);
 
@@ -267,16 +277,16 @@ export const DataProvider = ({ children }) => {
                         console.error("Failed to parse payment settings:", e);
                     }
                 }
-                
+
                 console.log('DataContext: Initialization Complete.');
             } catch (globalError) {
                 console.error('CRITICAL: DataContext Initialization Failed Entirely:', globalError);
                 setDbError(globalError.message || String(globalError));
-                // Fallbacks to keep app alive
-                setPackages(defaultPackages);
-                setLabs(defaultLabs);
-                setTestCategories(defaultCategories);
-                setBlogs(defaultBlogs);
+                // Fallbacks to keep app alive without wiping user data
+                setPackages(prev => prev.length > 0 ? prev : defaultPackages);
+                setLabs(prev => prev.length > 0 ? prev : defaultLabs);
+                setTestCategories(prev => prev.length > 0 ? prev : defaultCategories);
+                setBlogs(prev => prev.length > 0 ? prev : defaultBlogs);
             } finally {
                 setIsDataLoaded(true);
             }
