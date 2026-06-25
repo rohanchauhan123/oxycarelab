@@ -1,0 +1,50 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Environment variables
+.env
+
+# Local Node installation
+.node/
+
+# Custom builds and backups
+dist_*
+*.zip
+0
+check_admin.cjs
+cleanup_motion.js
+delete_test.js
+test_supabase.js
+build_error.log
+.vite_log.txt
+generate_crl_tests.js
+get_errors.cjs
+get_errors.html
+replace_colors.js
+run_server.sh
+dummy_test.csv
+test_inventory.csv
+test_packages.csv
+
