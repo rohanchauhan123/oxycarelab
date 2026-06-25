@@ -24,10 +24,15 @@ const API_URLS = {
 };
 
 // Supabase Admin Client
-const supabase = createClient(
-    process.env.VITE_SUPABASE_URL,
-    process.env.SUPABASE_SERVICE_ROLE_KEY
-);
+let supabase = null;
+if (process.env.VITE_SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY) {
+    supabase = createClient(
+        process.env.VITE_SUPABASE_URL,
+        process.env.SUPABASE_SERVICE_ROLE_KEY
+    );
+} else {
+    console.warn('Supabase URL or Service Role Key is missing. Supabase admin client not initialized.');
+}
 
 // Caching Setup
 const localCache = new NodeCache({ stdTTL: 600 }); // 10 mins default
