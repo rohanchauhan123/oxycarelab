@@ -23,6 +23,14 @@ const API_URLS = {
     PRODUCTION: 'https://api.phonepe.com/apis/hermes/pg/v1/pay'
 };
 
+// WhatsApp Business API Config
+const WA_PHONE_ID = process.env.WHATSAPP_PHONE_NUMBER_ID || '363638483505048';
+const WA_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN;
+
+// Razorpay Config
+const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID;
+const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
+
 // Supabase Admin Client
 let supabase = null;
 if (process.env.VITE_SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY) {
@@ -60,6 +68,180 @@ app.get('/', (req, res) => {
 
 app.get('/api/health', (req, res) => {
     res.json({ success: true, status: "healthy", message: "OxyCare Labs API Server is running." });
+});
+
+// ─────────────────────────────────────────────
+// WHATSAPP OTP ENDPOINTS
+// ─────────────────────────────────────────────
+
+app.post('/api/otp/send', async (req, res) => {
+    try {
+        const { phone } = req.body;
+        if (!phone) return res.status(400).json({ error: 'Phone number is required' });
+
+        // Generate 6-digit OTP
+        const otp = Math.floor(100000 + Math.random() * 900000).toString();
+        const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString(); // 10 min
+
+        // Store OTP in Supabase
+        if (supabase) {
+            const { error } = await supabase
+                .from('otps')
+                .upsert([{ phone, otp, expires_at: expiresAt }], { onConflict: 'phone' });
+            if (error) console.error('[OTP] Supabase store error:', error.message);
+        }
+
+        // Format phone number for WhatsApp (91XXXXXXXXXX format, no + or spaces)
+        const cleanPhone = phone.replace(/[^0-9]/g, '');
+        const waPhone = cleanPhone.startsWith('91') ? cleanPhone : `91${cleanPhone}`;
+
+        // Send OTP via WhatsApp Cloud API
+        if (WA_TOKEN) {
+            const waRes = await axios.post(
+                `https://graph.facebook.com/v19.0/${WA_PHONE_ID}/messages`,
+                {
+                    messaging_product: 'whatsapp',
+                    to: waPhone,
+                    type: 'text',
+                    text: {
+                        body: `🏥 *OxyCare Labs*\n\nYour verification OTP is:\n\n*${otp}*\n\nValid for 10 minutes. Do not share this code with anyone.`
+                    }
+                },
+                {
+                    headers: {
+                        'Authorization': `Bearer ${WA_TOKEN}`,
+                        'Content-Type': 'application/json'
+                    },
+                    timeout: 10000
+                }
+            );
+            console.log('[OTP] WhatsApp sent to', waPhone, '| WA Message ID:', waRes.data?.messages?.[0]?.id);
+        } else {
+            console.warn('[OTP] WHATSAPP_ACCESS_TOKEN not set. OTP generated but NOT sent via WhatsApp. OTP:', otp);
+        }
+
+        res.json({ success: true, message: 'OTP sent via WhatsApp successfully!' });
+
+    } catch (error) {
+        console.error('[OTP] Send error:', error.response?.data || error.message);
+        const errMsg = error.response?.data?.error?.message || error.message;
+        res.status(500).json({ error: `Failed to send OTP: ${errMsg}` });
+    }
+});
+
+app.post('/api/otp/verify', async (req, res) => {
+    try {
+        const { phone, otp } = req.body;
+        if (!phone || !otp) return res.status(400).json({ error: 'Phone and OTP are required' });
+
+        if (!supabase) return res.status(500).json({ error: 'Database not configured on server' });
+
+        const { data, error } = await supabase
+            .from('otps')
+            .select('otp, expires_at')
+            .eq('phone', phone)
+            .single();
+
+        if (error || !data) {
+            return res.status(400).json({ error: 'OTP not found or already used. Please request a new OTP.' });
+        }
+
+        if (new Date(data.expires_at) < new Date()) {
+            await supabase.from('otps').delete().eq('phone', phone);
+            return res.status(400).json({ error: 'OTP has expired. Please request a new one.' });
+        }
+
+        if (data.otp !== String(otp)) {
+            return res.status(400).json({ error: 'Invalid OTP. Please try again.' });
+        }
+
+        // OTP matched — delete it so it can't be reused
+        await supabase.from('otps').delete().eq('phone', phone);
+        res.json({ success: true, message: 'OTP verified successfully!' });
+
+    } catch (error) {
+        console.error('[OTP] Verify error:', error.message);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// ─────────────────────────────────────────────
+// RAZORPAY PAYMENT ENDPOINTS
+// ─────────────────────────────────────────────
+
+app.post('/api/payment/razorpay/create-order', async (req, res) => {
+    try {
+        const { amount, bookingId, currency = 'INR' } = req.body;
+        if (!amount || !bookingId) return res.status(400).json({ error: 'Amount and bookingId are required' });
+
+        if (!RAZORPAY_KEY_ID || !RAZORPAY_KEY_SECRET) {
+            return res.status(500).json({ error: 'Razorpay credentials not configured on server' });
+        }
+
+        const orderPayload = {
+            amount: Math.round(amount * 100), // paise
+            currency,
+            receipt: bookingId,
+            notes: { bookingId }
+        };
+
+        const rzpRes = await axios.post(
+            'https://api.razorpay.com/v1/orders',
+            orderPayload,
+            {
+                auth: { username: RAZORPAY_KEY_ID, password: RAZORPAY_KEY_SECRET },
+                headers: { 'Content-Type': 'application/json' },
+                timeout: 10000
+            }
+        );
+
+        res.json({
+            success: true,
+            orderId: rzpRes.data.id,
+            amount: rzpRes.data.amount,
+            currency: rzpRes.data.currency,
+            keyId: RAZORPAY_KEY_ID
+        });
+
+    } catch (error) {
+        console.error('[Razorpay] Create order error:', error.response?.data || error.message);
+        res.status(500).json({ error: error.response?.data?.error?.description || error.message });
+    }
+});
+
+app.post('/api/payment/razorpay/verify', async (req, res) => {
+    try {
+        const { razorpay_order_id, razorpay_payment_id, razorpay_signature, bookingId } = req.body;
+        if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
+            return res.status(400).json({ error: 'Missing payment verification parameters' });
+        }
+
+        // Verify signature
+        const body = razorpay_order_id + '|' + razorpay_payment_id;
+        const expectedSignature = crypto
+            .createHmac('sha256', RAZORPAY_KEY_SECRET)
+            .update(body)
+            .digest('hex');
+
+        if (expectedSignature !== razorpay_signature) {
+            return res.status(400).json({ error: 'Payment signature verification failed. Payment may be fraudulent.' });
+        }
+
+        // Update booking status in Supabase if bookingId provided
+        if (supabase && bookingId) {
+            const { data: current } = await supabase.from('bookings').select('data').eq('id', bookingId).single();
+            if (current) {
+                const updated = { ...current.data, status: 'Confirmed', paymentId: razorpay_payment_id, paymentMethod: 'Razorpay' };
+                await supabase.from('bookings').update({ data: updated }).eq('id', bookingId);
+            }
+        }
+
+        res.json({ success: true, paymentId: razorpay_payment_id, message: 'Payment verified successfully!' });
+
+    } catch (error) {
+        console.error('[Razorpay] Verify error:', error.message);
+        res.status(500).json({ error: error.message });
+    }
 });
 
 app.post('/api/payment/create', async (req, res) => {
